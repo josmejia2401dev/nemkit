@@ -84,6 +84,12 @@ class MongoClient {
         serverSelectionTimeoutMS: 20000,
         connectTimeoutMS: 25000,
         socketTimeoutMS: 45000,
+        // Node 18.13+ defaults autoSelectFamily to true (Happy Eyeballs:
+        // races IPv4/IPv6). In containers and networks that advertise IPv6
+        // but don't route it well (Docker, Render), this causes intermittent
+        // connection failures with Atlas ("ReplicaSetNoPrimary"). Disabling
+        // it forces a stable single-stack connection.
+        autoSelectFamily: false,
       };
 
       // Only set TLS options explicitly when TLS is requested. With a

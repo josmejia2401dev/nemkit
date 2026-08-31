@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Toolkit opinionado Node.js + Express + MongoDB — production-ready, modular, SOLID",
   "main": "src/index.js",
+  "files": ["src", "README.md", "LICENSE"],
   "engines": {
     "node": ">=20.0.0"
   },

@@ -81,13 +81,23 @@ class MongoClient {
       const connectionOptions = {
         maxPoolSize,
         minPoolSize,
-        serverSelectionTimeoutMS: 10000,
-        connectTimeoutMS: 15000,
+        serverSelectionTimeoutMS: 20000,
+        connectTimeoutMS: 25000,
         socketTimeoutMS: 45000,
-        tls,
-        tlsAllowInvalidCertificates,
       };
 
+      // Only set TLS options explicitly when TLS is requested. With a
+      // "mongodb+srv://" URI, TLS is implied by the driver, and forcing
+      // "tls: false" conflicts with it (causes SSL handshake errors).
+      if (tls) {
+        connectionOptions.tls = true;
+        if (tlsAllowInvalidCertificates) {
+          connectionOptions.tlsAllowInvalidCertificates = true;
+        }
+      }
+
+      // serverApi.strict rejects any command outside the Stable API v1,
+      // which can break connections/operations unexpectedly. Keep it opt-in.
       if (useServerApi) {
         connectionOptions.serverApi = {
           version: mongoose.mongo.ServerApiVersion.v1,

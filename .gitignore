@@ -2,7 +2,8 @@ node_modules/
 .env
 .env.*
 !.env.example
-logs/
+# Runtime logs only (root-level), NOT the src/modules/logs source module
+/logs/
 workspace/
 *.log
 coverage/

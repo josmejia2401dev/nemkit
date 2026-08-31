@@ -16,11 +16,15 @@ class EnvLoader {
   constructor(schema = {}, options = {}) {
     const envPath = options.path ?? path.resolve(process.cwd(), '.env');
 
-    if (!fs.existsSync(envPath)) {
+    // A .env file is optional. When it is missing (e.g. Docker, Render, CI),
+    // values are read directly from process.env. Set options.requireFile
+    // to true to enforce that the file must exist.
+    if (fs.existsSync(envPath)) {
+      this.#parseEnvFile(envPath);
+    } else if (options.requireFile) {
       throw new Error(`EnvLoader — .env file not found: ${envPath}`);
     }
 
-    this.#parseEnvFile(envPath);
     this.#load(schema);
     return Object.freeze(this.#values);
   }

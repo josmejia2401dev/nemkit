@@ -83,7 +83,10 @@ class Logger {
 
     if (this.#rotateEnabled) {
       this.#ensureLogsDir();
-      this.#transports.push((entry) => this.#writeFile(entry));
+      // #ensureLogsDir may disable file logging if no writable dir is available.
+      if (this.#rotateEnabled) {
+        this.#transports.push((entry) => this.#writeFile(entry));
+      }
     }
 
     if (options.customTransports?.length) {
@@ -232,7 +235,31 @@ class Logger {
   }
 
   #ensureLogsDir() {
-    try { fs.mkdirSync(this.#logsPath, { recursive: true }); } catch { /* exists */ }
+    try {
+      fs.mkdirSync(this.#logsPath, { recursive: true });
+      return;
+    } catch (err) {
+      // The configured path could not be created (permissions, invalid path,
+      // read-only filesystem, etc.). Fall back to ./logs relative to the CWD.
+      const fallback = path.resolve(process.cwd(), 'logs');
+
+      // Avoid an infinite/confusing message if the configured path already was ./logs
+      if (path.resolve(this.#logsPath) !== fallback) {
+        process.stderr.write(
+          `[logger] Could not use logs path "${this.#logsPath}" (${err.code ?? err.message}). Falling back to "${fallback}".\n`
+        );
+      }
+
+      try {
+        fs.mkdirSync(fallback, { recursive: true });
+        this.#logsPath = fallback;
+      } catch {
+        // Even the fallback failed — disable file logging and keep console only.
+        // Logging must never break application startup.
+        this.#rotateEnabled = false;
+        process.stderr.write('[logger] File logging disabled — writing to console only.\n');
+      }
+    }
   }
 
   #getDateStr() {

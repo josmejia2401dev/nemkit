@@ -13,16 +13,54 @@ const path = require('path');
 class EnvLoader {
   #values = {};
 
+  /**
+   * Loads environment variables from a cascade of files.
+   *
+   * Precedence (highest to lowest):
+   *   process.env (real system vars)  >  .env.local  >  .env.{environment}  >  .env
+   *
+   * - `.env`               base values (also used as the production baseline)
+   * - `.env.{environment}` per-environment overrides (e.g. .env.development)
+   * - `.env.local`         personal/local overrides (should not be committed)
+   *
+   * Because #parseEnvFile only sets a key when it is still undefined
+   * ("first writer wins"), files are parsed from highest to lowest priority.
+   *
+   * @param {Object} schema
+   * @param {Object} [options]
+   * @param {string} [options.environment] — selects .env.{environment}; defaults to NODE_ENV or 'development'
+   * @param {string} [options.path=process.cwd()] — directory holding the env files
+   * @param {string} [options.envFile] — explicit single file (bypasses the cascade)
+   * @param {boolean} [options.requireFile=false] — throw if no env file is found
+   */
   constructor(schema = {}, options = {}) {
-    const envPath = options.path ?? path.resolve(process.cwd(), '.env');
+    const environment = options.environment ?? process.env.NODE_ENV ?? 'development';
+    const baseDir = options.path ?? process.cwd();
 
-    // A .env file is optional. When it is missing (e.g. Docker, Render, CI),
+    // If an explicit envFile is given, load only that one (single-file mode).
+    // Otherwise, build the cascade of candidate files (highest priority first).
+    const candidates = options.envFile
+      ? [path.resolve(baseDir, options.envFile)]
+      : [
+          path.resolve(baseDir, '.env.local'),           // highest priority
+          path.resolve(baseDir, `.env.${environment}`),  // per-environment
+          path.resolve(baseDir, '.env'),                 // base / production baseline
+        ];
+
+    let anyLoaded = false;
+
+    for (const file of candidates) {
+      if (fs.existsSync(file)) {
+        this.#parseEnvFile(file);
+        anyLoaded = true;
+      }
+    }
+
+    // Env files are optional. When none exist (e.g. Docker, Render, CI),
     // values are read directly from process.env. Set options.requireFile
-    // to true to enforce that the file must exist.
-    if (fs.existsSync(envPath)) {
-      this.#parseEnvFile(envPath);
-    } else if (options.requireFile) {
-      throw new Error(`EnvLoader — .env file not found: ${envPath}`);
+    // to true to enforce that at least one file must exist.
+    if (!anyLoaded && options.requireFile) {
+      throw new Error(`EnvLoader — no env file found in: ${baseDir} (looked for ${candidates.map((c) => path.basename(c)).join(', ')})`);
     }
 
     this.#load(schema);

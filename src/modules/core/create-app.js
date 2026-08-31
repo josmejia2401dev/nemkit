@@ -17,7 +17,11 @@ const DEFAULT_OPTIONS = {
   bodyLimit: '10mb',
   rateLimitWindowMs: 900000,
   rateLimitMax: 100,
-  skipPaths: ['/health', '/ready'],
+  skipPaths: ['/', '/health', '/ready'],
+  rootEndpoint: true,
+  appName: 'app',
+  appVersion: null,
+  environment: process.env.NODE_ENV ?? 'development',
 };
 
 /**
@@ -27,6 +31,10 @@ const DEFAULT_OPTIONS = {
  * @param {number} [options.rateLimitMax=100]
  * @param {string[]} [options.skipPaths]
  * @param {Object} [options.logger]
+ * @param {boolean} [options.rootEndpoint=true] — mounts an informational GET / endpoint
+ * @param {string} [options.appName='app'] — shown in the root endpoint
+ * @param {string} [options.appVersion] — shown in the root endpoint
+ * @param {string} [options.environment] — shown in the root endpoint (defaults to NODE_ENV)
  * @returns {import('express').Application}
  */
 const createApp = (options = {}) => {
@@ -34,6 +42,18 @@ const createApp = (options = {}) => {
   const skipSet = new Set(opts.skipPaths);
 
   const app = express();
+
+  // Informational root endpoint (health/liveness + build info).
+  // Mounted early so it is not affected by rate limiting or auth downstream.
+  if (opts.rootEndpoint) {
+    app.get('/', (_req, res) => res.json({
+      status: 'ok',
+      app: opts.appName,
+      version: opts.appVersion,
+      environment: opts.environment,
+      timestamp: new Date().toISOString(),
+    }));
+  }
 
   // Security headers (nativo, sin helmet)
   app.use((_req, res, next) => {

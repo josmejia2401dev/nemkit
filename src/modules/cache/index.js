@@ -21,13 +21,20 @@ const EVICTION_POLICIES = Object.freeze({
 });
 
 class CacheEntry {
-  constructor(key, value, ttlMs) {
+  /**
+   * @param {string} key
+   * @param {*} value
+   * @param {number} ttlMs
+   * @param {string[]} [tags=[]] — Etiquetas para invalidación por grupo (ej: ['user:42'])
+   */
+  constructor(key, value, ttlMs, tags = []) {
     this.key = key;
     this.value = value;
     this.createdAt = Date.now();
     this.expiresAt = ttlMs > 0 ? this.createdAt + ttlMs : Infinity;
     this.lastAccessedAt = this.createdAt;
     this.accessCount = 0;
+    this.tags = Array.isArray(tags) ? tags : [];
   }
 
   isExpired() {
@@ -42,6 +49,7 @@ class CacheEntry {
 
 class MemoryCache {
   #store = new Map();
+  #tagIndex = new Map(); // tag -> Set<fullKey>
   #maxSize;
   #defaultTtlMs;
   #policy;
@@ -93,7 +101,7 @@ class MemoryCache {
     }
 
     if (entry.isExpired()) {
-      this.#store.delete(this.#key(key));
+      this.#remove(this.#key(key));
       this.#misses++;
       return undefined;
     }
@@ -113,21 +121,20 @@ class MemoryCache {
    */
   set(key, value, options = {}) {
     const ttl = options.ttlMs ?? this.#defaultTtlMs;
+    const tags = options.tags ?? [];
     const fullKey = this.#key(key);
 
-    // Si ya existe, actualizamos sin contar como nueva entrada
+    // Si ya existe, desindexamos sus tags previos antes de reemplazar
     if (this.#store.has(fullKey)) {
-      const entry = new CacheEntry(fullKey, value, ttl);
-      this.#store.set(fullKey, entry);
-      return this;
-    }
-
-    // Evict si estamos al límite
-    if (this.#store.size >= this.#maxSize) {
+      this.#unindexTags(this.#store.get(fullKey));
+    } else if (this.#store.size >= this.#maxSize) {
+      // Evict solo si es una entrada nueva y estamos al límite
       this.#evict();
     }
 
-    this.#store.set(fullKey, new CacheEntry(fullKey, value, ttl));
+    const entry = new CacheEntry(fullKey, value, ttl, tags);
+    this.#store.set(fullKey, entry);
+    this.#indexTags(entry);
     return this;
   }
 
@@ -139,7 +146,7 @@ class MemoryCache {
   has(key) {
     const entry = this.#store.get(this.#key(key));
     if (!entry) return false;
-    if (entry.isExpired()) { this.#store.delete(this.#key(key)); return false; }
+    if (entry.isExpired()) { this.#remove(this.#key(key)); return false; }
     return true;
   }
 
@@ -149,7 +156,7 @@ class MemoryCache {
    * @returns {boolean}
    */
   del(key) {
-    return this.#store.delete(this.#key(key));
+    return this.#remove(this.#key(key));
   }
 
   /**
@@ -157,6 +164,7 @@ class MemoryCache {
    */
   clear() {
     this.#store.clear();
+    this.#tagIndex.clear();
   }
 
   /**
@@ -165,6 +173,19 @@ class MemoryCache {
    */
   get size() {
     return this.#store.size;
+  }
+
+  /**
+   * Lista las keys activas (sin prefijo), descartando expiradas.
+   * @returns {string[]}
+   */
+  keys() {
+    const out = [];
+    for (const [fullKey, entry] of this.#store) {
+      if (entry.isExpired()) { this.#remove(fullKey); continue; }
+      out.push(this.#stripPrefix(fullKey));
+    }
+    return out;
   }
 
   // --- Patterns ---
@@ -223,7 +244,7 @@ class MemoryCache {
     }
 
     // Completamente expirado — refresh síncrono
-    this.#store.delete(this.#key(key));
+    this.#remove(this.#key(key));
     const value = await fetchFn();
     this.set(key, value, options);
     return value;
@@ -239,10 +260,46 @@ class MemoryCache {
     let count = 0;
     for (const key of this.#store.keys()) {
       if (regex.test(key)) {
-        this.#store.delete(key);
+        this.#remove(key);
         count++;
       }
     }
+    return count;
+  }
+
+  /**
+   * Invalida todas las entradas asociadas a un tag. O(k) sobre las entradas
+   * del tag, sin escanear todo el store.
+   *
+   * @example
+   *   cache.set('user:42:profile', data, { tags: ['user:42'] });
+   *   cache.set('user:42:prefs',   data, { tags: ['user:42'] });
+   *   cache.invalidateTag('user:42'); // elimina ambas
+   *
+   * @param {string} tag
+   * @returns {number} — Cantidad de entradas eliminadas
+   */
+  invalidateTag(tag) {
+    const keys = this.#tagIndex.get(tag);
+    if (!keys) return 0;
+    let count = 0;
+    // Copiamos porque #remove muta el Set del índice
+    for (const fullKey of [...keys]) {
+      if (this.#store.delete(fullKey)) count++;
+      this.#dropKeyFromAllTags(fullKey);
+    }
+    this.#tagIndex.delete(tag);
+    return count;
+  }
+
+  /**
+   * Invalida múltiples tags de una vez.
+   * @param {string[]} tags
+   * @returns {number} — Total de entradas eliminadas
+   */
+  invalidateTags(tags = []) {
+    let count = 0;
+    for (const tag of tags) count += this.invalidateTag(tag);
     return count;
   }
 
@@ -285,12 +342,53 @@ class MemoryCache {
       this.#cleanupTimer = null;
     }
     this.#store.clear();
+    this.#tagIndex.clear();
   }
 
   // --- Private ---
 
   #key(key) {
     return this.#prefix ? `${this.#prefix}:${key}` : key;
+  }
+
+  #stripPrefix(fullKey) {
+    return this.#prefix && fullKey.startsWith(`${this.#prefix}:`)
+      ? fullKey.slice(this.#prefix.length + 1)
+      : fullKey;
+  }
+
+  /** Elimina una entrada por fullKey y limpia su rastro en el índice de tags. */
+  #remove(fullKey) {
+    const entry = this.#store.get(fullKey);
+    if (!entry) return false;
+    this.#unindexTags(entry);
+    return this.#store.delete(fullKey);
+  }
+
+  /** Registra la key bajo cada uno de sus tags. */
+  #indexTags(entry) {
+    for (const tag of entry.tags) {
+      let set = this.#tagIndex.get(tag);
+      if (!set) { set = new Set(); this.#tagIndex.set(tag, set); }
+      set.add(entry.key);
+    }
+  }
+
+  /** Quita la key de los tags de la entrada; borra el tag si queda vacío. */
+  #unindexTags(entry) {
+    for (const tag of entry.tags) {
+      const set = this.#tagIndex.get(tag);
+      if (!set) continue;
+      set.delete(entry.key);
+      if (set.size === 0) this.#tagIndex.delete(tag);
+    }
+  }
+
+  /** Quita una fullKey de todos los tags del índice (usado al invalidar por tag). */
+  #dropKeyFromAllTags(fullKey) {
+    for (const [tag, set] of this.#tagIndex) {
+      if (set.delete(fullKey) && set.size === 0) this.#tagIndex.delete(tag);
+    }
   }
 
   #evict() {
@@ -319,7 +417,7 @@ class MemoryCache {
     }
 
     if (victim) {
-      this.#store.delete(victim.key);
+      this.#remove(victim.key);
       this.#evictions++;
     }
   }
@@ -329,7 +427,7 @@ class MemoryCache {
       const now = Date.now();
       for (const [key, entry] of this.#store) {
         if (now > entry.expiresAt) {
-          this.#store.delete(key);
+          this.#remove(key);
         }
       }
     }, this.#cleanupInterval);
@@ -348,4 +446,27 @@ class MemoryCache {
  */
 const createCache = (options = {}) => new MemoryCache(options);
 
-module.exports = { MemoryCache, createCache, EVICTION_POLICIES };
+const { CacheStore } = require('./stores/cache-store');
+const { MemoryStore } = require('./stores/memory-store');
+const { FileStore } = require('./stores/file-store');
+const { TieredCache } = require('./tiered-cache');
+
+/**
+ * Factory de cache de dos niveles (memoria + storage JSON).
+ * @param {Object} [options] — Mismas opciones que TieredCache
+ * @returns {TieredCache}
+ */
+const createTieredCache = (options = {}) => new TieredCache(options);
+
+module.exports = {
+  // In-memory cache clásico
+  MemoryCache,
+  createCache,
+  EVICTION_POLICIES,
+  // Cache multinivel (memoria + storage)
+  TieredCache,
+  createTieredCache,
+  CacheStore,
+  MemoryStore,
+  FileStore,
+};

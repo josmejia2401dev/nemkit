@@ -267,6 +267,38 @@ class MemoryCache {
     return count;
   }
 
+  listEntries({ page = 1, limit = 50, search = '' } = {}) {
+    const safePage = Math.max(1, Number(page) || 1);
+    const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
+    const normalizedSearch = String(search).toLowerCase();
+    const keys = this.keys()
+      .filter((key) => key.toLowerCase().includes(normalizedSearch));
+    const start = (safePage - 1) * safeLimit;
+    return {
+      entries: keys.slice(start, start + safeLimit).map((key) => ({
+        key,
+        value: this.get(key),
+        sizeBytes: Buffer.byteLength(JSON.stringify(this.get(key) ?? null), 'utf8'),
+      })),
+      pagination: {
+        page: safePage,
+        limit: safeLimit,
+        total: keys.length,
+        totalPages: Math.ceil(keys.length / safeLimit),
+      },
+    };
+  }
+
+  getEntry(key) {
+    if (!this.has(key)) return null;
+    const value = this.get(key);
+    return {
+      key,
+      value,
+      sizeBytes: Buffer.byteLength(JSON.stringify(value ?? null), 'utf8'),
+    };
+  }
+
   /**
    * Invalida todas las entradas asociadas a un tag. O(k) sobre las entradas
    * del tag, sin escanear todo el store.

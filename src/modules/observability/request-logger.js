@@ -45,11 +45,10 @@ function createRequestLogger(options = {}) {
         userId: req.user?.id ?? null,
         ip: req.ip,
         userAgent: req.headers['user-agent'] ?? null,
-        durationMs: metrics.durationMs,
-        cpuUserMs: metrics.cpuUserMs,
-        cpuSystemMs: metrics.cpuSystemMs,
-        memHeapDeltaMb: metrics.memHeapDeltaMb,
-        memRssMb: metrics.memRssMb,
+        responseTimeMs: metrics.responseTimeMs,
+        cpuTimeMs: metrics.cpuTimeMs,
+        memoryConsumedMb: metrics.memoryConsumedMb,
+        totalMemoryConsumedMb: metrics.totalMemoryConsumedMb,
         timestamp: new Date().toISOString(),
       };
 

@@ -73,11 +73,10 @@ function endRequestSample(sample) {
   const cpu = process.cpuUsage(sample.cpu);
   const mem = process.memoryUsage();
   return {
-    durationMs: Math.round(Number(process.hrtime.bigint() - sample.hrtime) / 1e6),
-    cpuUserMs: Math.round(cpu.user / 1000),
-    cpuSystemMs: Math.round(cpu.system / 1000),
-    memHeapDeltaMb: toMb(mem.heapUsed - sample.heapUsed),
-    memRssMb: toMb(mem.rss),
+    responseTimeMs: Math.round(Number(process.hrtime.bigint() - sample.hrtime) / 1e6),
+    cpuTimeMs: Math.round((cpu.user + cpu.system) / 1000),
+    memoryConsumedMb: toMb(mem.heapUsed - sample.heapUsed),
+    totalMemoryConsumedMb: toMb(mem.rss),
   };
 }
 

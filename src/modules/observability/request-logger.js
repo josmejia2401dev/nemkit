@@ -13,12 +13,26 @@ function levelForStatus(statusCode) {
 function createRequestLogger(options = {}) {
   const logger = options.logger ?? console;
   const enabled = options.enabled !== false;
+  const logStart = options.logStart !== false;
   const skipPaths = new Set(options.skipPaths ?? DEFAULT_SKIP_PATHS);
 
   return function requestLogger(req, res, next) {
     if (!enabled || skipPaths.has(req.path)) return next();
 
     const sample = startRequestSample();
+
+    if (logStart) {
+      logger.info?.('request.start', {
+        event: 'request.start',
+        method: req.method,
+        path: req.originalUrl,
+        requestId: req.requestId ?? null,
+        userId: req.user?.id ?? null,
+        ip: req.ip,
+        userAgent: req.headers['user-agent'] ?? null,
+        timestamp: new Date().toISOString(),
+      });
+    }
 
     res.on('finish', () => {
       const metrics = endRequestSample(sample);

@@ -50,6 +50,7 @@ class Logger {
   #currentFileStream = null;
   #currentFileDate = null;
   #rotateEnabled;
+  #contextProvider;
 
   /**
    * @param {Object} [options]
@@ -63,6 +64,7 @@ class Logger {
    * @param {boolean} [options.fileEnabled=true]
    * @param {boolean} [options.consoleEnabled=true]
    * @param {Function[]} [options.customTransports=[]]
+   * @param {Function} [options.contextProvider] — () => ({ requestId, userId }); adjunta correlación automática por log
    */
   constructor(options = {}) {
     this.#level = options.level ?? 'info';
@@ -74,6 +76,7 @@ class Logger {
     this.#maxFileSize = (options.maxFileSizeMb ?? 20) * 1024 * 1024;
     this.#maxFiles = options.maxFiles ?? 30;
     this.#rotateEnabled = options.fileEnabled !== false;
+    this.#contextProvider = typeof options.contextProvider === 'function' ? options.contextProvider : null;
 
     this.#transports = [];
 
@@ -166,6 +169,8 @@ class Logger {
     const levelNum = LOG_LEVELS[level];
     if (levelNum === undefined || levelNum > this.#levelNum) return;
 
+    const context = this.#contextProvider ? (this.#contextProvider() ?? {}) : {};
+
     const entry = {
       timestamp: new Date().toISOString(),
       level,
@@ -174,6 +179,11 @@ class Logger {
       ...this.#defaultMeta,
       ...meta,
     };
+
+    // Correlación automática: adjunta requestId/userId del contexto de la
+    // solicitud actual si el log no los trae ya de forma explícita.
+    if (context.requestId != null && entry.requestId == null) entry.requestId = context.requestId;
+    if (context.userId != null && entry.userId == null) entry.userId = context.userId;
 
     if (meta.error instanceof Error) {
       entry.error = meta.error.message;

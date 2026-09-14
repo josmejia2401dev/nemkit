@@ -127,12 +127,26 @@ class MongoRepository extends BaseRepository {
     if (select) docsQuery = docsQuery.select(select);
     if (populate) docsQuery = docsQuery.populate(populate);
 
-    const [docs, total] = await Promise.all([this._applyTimeout(docsQuery), this._applyTimeout(this.model.countDocuments(query))]);
-    const totalPages = Math.ceil(total / limit);
+    const countPromise = (useEstimatedCount && Object.keys(query).length === 0)
+      ? this.model.estimatedDocumentCount()
+      : this.model.countDocuments(query).maxTimeMS(this.queryTimeoutMs);
 
+    const [docs, total] = await Promise.all([
+      this._prepareQuery(docsQuery, options),
+      countPromise,
+    ]);
+
+    const totalPages = Math.ceil(total / limit);
     return {
       data: docs.map((d) => this.normalizeOutput(d)),
-      pagination: { total, page, limit, totalPages, hasNext: page < totalPages, hasPrev: page > 1 },
+      pagination: {
+        total,
+        page: +page,
+        limit: +limit,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
     };
   }
 

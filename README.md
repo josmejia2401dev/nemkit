@@ -32,6 +32,7 @@ nemkit/src/modules/
 ├── storage/        → DiskStorage, MemoryStorage (streaming, Range support)
 ├── queue/          → Cola de tareas en memoria (concurrency, retry, DLQ, priority)
 ├── seeds/          → Seeder para data por defecto (upsert, bulk, dry run)
+├── system/         → Métricas de máquina, CPU, cgroups (Docker/Render) y sampler
 ├── helpers/        → UniqueNumberUtil, pagination, date, queryFilters
 └── validators/     → Validador schema-based (sin express-validator)
 ```
@@ -112,15 +113,23 @@ const userValidator = createValidator({
 router.post('/users', userValidator.middleware(), controller.create);
 ```
 
-### storage
+### storage (3 Modos: Memoria, Disco Directo, Disco por Chunks)
 
 ```js
 const { DiskStorage, MemoryStorage, serveFile } = require('nemkit');
 
 const disk = new DiskStorage({ basePath: './uploads' });
+
+// 1. Guardado en disco normal (Buffer, Stream o Path)
 await disk.save('videos/intro.mp4', buffer, { mime: 'video/mp4' });
 
-// Servir con Range support (video streaming)
+// 2. Guardado en disco por chunks (Multipart / Resumable upload)
+const { uploadId } = await disk.initChunkUpload('videos/large.mp4', { totalChunks: 10 });
+await disk.saveChunk(uploadId, 0, chunkBuffer);
+// ... recibir resto de chunks ...
+const fileMeta = await disk.completeChunkUpload(uploadId);
+
+// 3. Servir con Range support (video/audio streaming)
 app.get('/files/:key(*)', (req, res) => serveFile(req, res, disk, req.params.key));
 ```
 

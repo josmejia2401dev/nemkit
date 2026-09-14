@@ -481,7 +481,7 @@ const createCache = (options = {}) => new MemoryCache(options);
 const { CacheStore } = require('./stores/cache-store');
 const { MemoryStore } = require('./stores/memory-store');
 const { FileStore } = require('./stores/file-store');
-const { TieredCache } = require('./tiered-cache');
+const { TieredCache, CACHE_MODES } = require('./tiered-cache');
 
 /**
  * Factory de cache de dos niveles (memoria + storage JSON).
@@ -498,6 +498,7 @@ module.exports = {
   // Cache multinivel (memoria + storage)
   TieredCache,
   createTieredCache,
+  CACHE_MODES,
   CacheStore,
   MemoryStore,
   FileStore,

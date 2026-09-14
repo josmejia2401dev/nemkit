@@ -1,6 +1,7 @@
 'use strict';
 
 const { Readable } = require('stream');
+const { StorageEngine } = require('./storage-engine');
 
 /**
  * @module storage/MemoryStorage
@@ -21,7 +22,7 @@ const { Readable } = require('stream');
  * - Range support (chunks de lectura)
  */
 
-class MemoryStorage {
+class MemoryStorage extends StorageEngine {
   #store = new Map();
   #maxFileSize;
   #maxTotalSize;
@@ -37,6 +38,7 @@ class MemoryStorage {
    * @param {number} [options.cleanupIntervalMs=60000] — Intervalo de limpieza de expirados
    */
   constructor(options = {}) {
+    super();
     this.#maxFileSize = options.maxFileSize ?? 50 * 1024 * 1024;
     this.#maxTotalSize = options.maxTotalSize ?? 200 * 1024 * 1024;
     this.#defaultTtlMs = options.defaultTtlMs ?? 0;
@@ -210,6 +212,21 @@ class MemoryStorage {
   /**
    * Detiene cleanup timer.
    */
+  /**
+   * Transfiere un archivo desde memoria hacia otro StorageEngine (disco, cloud, etc.).
+   * Libera la entrada de RAM una vez guardada exitosamente en el destino.
+   * @param {string} key
+   * @param {StorageEngine} targetEngine
+   * @returns {Promise<Object>} Metadata del archivo en el destino
+   */
+  async moveTo(key, targetEngine) {
+    const entry = this.#getEntry(key);
+    if (!entry) throw new Error(`MemoryStorage.moveTo: key '${key}' not found`);
+    const result = await targetEngine.save(key, entry.buffer, entry.metadata);
+    this.delete(key);
+    return result;
+  }
+
   destroy() {
     if (this.#cleanupTimer) {
       clearInterval(this.#cleanupTimer);

@@ -1,7 +1,17 @@
 'use strict';
 
+const { StorageHandler, createStorageHandler } = require('./storage-handler');
+const { FileHandle } = require('./file-handle');
+const { StorageEngine } = require('./storage-engine');
 const { DiskStorage } = require('./disk-storage');
-const { MemoryStorage } = require('./memory-storage');
 const { serveFile, streamToBuffer } = require('./utils');
 
-module.exports = { DiskStorage, MemoryStorage, serveFile, streamToBuffer };
+module.exports = {
+  StorageHandler,
+  createStorageHandler,
+  FileHandle,
+  StorageEngine,
+  DiskStorage,
+  serveFile,
+  streamToBuffer,
+};

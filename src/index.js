@@ -25,6 +25,7 @@ const storage = require('./modules/storage');
 const queue = require('./modules/queue');
 const seeds = require('./modules/seeds');
 const events = require('./modules/events');
+const system = require('./modules/system');
 
 // Expose underlying libs for direct access
 const express = require('express');
@@ -76,6 +77,9 @@ module.exports = {
   // Events
   ...events,
 
+  // System
+  ...system,
+
   // Named module access
-  modules: { core, data, http, security, observability, logs, cache, helpers, validators, storage, queue, seeds, events },
+  modules: { core, data, http, security, observability, logs, cache, helpers, validators, storage, queue, seeds, events, system },
 };

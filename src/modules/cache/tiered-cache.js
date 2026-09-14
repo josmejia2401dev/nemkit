@@ -2,19 +2,24 @@
 
 const { MemoryStore } = require('./stores/memory-store');
 const { FileStore } = require('./stores/file-store');
+const { isMemoryUnderPressure } = require('../system');
+
+const CACHE_MODES = Object.freeze({
+  MEMORY: 'MEMORY',
+  DEGRADED_DISK: 'DEGRADED_DISK',
+});
 
 /**
  * @module cache/TieredCache
  *
- * Cache de dos niveles (patrón Strategy + fachada):
- *   L1 = memoria (rápida, volátil)   →   L2 = storage persistente (JSON)
+ * Cache adaptativo de dos niveles (patrón Strategy + State Machine):
+ *   L1 = memoria (rápida, volátil)   →   L2 = storage persistente (JSON/archivo)
  *
- * - get: busca en L1; si falla, busca en L2 y repuebla L1 (read-through).
- * - set: escribe en ambos niveles (write-through).
- * - Invalidación por tag/patrón afecta ambos niveles.
- * - Misma API que MemoryCache: get/set/has/del/getOrSet/invalidateTag/...
- *
- * El TTL se expresa en ms (0 = sin expiración).
+ * Estados adaptativos según presión de memoria (cgroups / Docker / Render):
+ * - MEMORY: Operación normal L1 + L2.
+ * - DEGRADED_DISK: Cuando el contenedor entra en presión (>75% RAM), evacúa L1
+ *   inmediatamente para evitar OOM Killer y conmuta a operación directa en disco (L2).
+ *   Al recuperarse (<60% RAM), restaura la admisión en L1.
  */
 class TieredCache {
   #l1;
@@ -22,6 +27,17 @@ class TieredCache {
   #defaultTtlMs;
   #prefix;
   #tagIndex = new Map(); // tag -> Set<fullKey>
+
+  // Adaptive State Machine
+  #adaptive;
+  #pressureThresholdPercent;
+  #recoveryThresholdPercent;
+  #maxRssMb;
+  #mode = CACHE_MODES.MEMORY;
+  #transitionsCount = 0;
+  #lastTransitionAt = null;
+  #l1Evacuations = 0;
+  #monitorTimer = null;
 
   // Stats
   #hits = 0;
@@ -35,12 +51,28 @@ class TieredCache {
    * @param {string}  options.file.path — Ruta del JSON
    * @param {number} [options.defaultTtlMs=60000]
    * @param {string} [options.prefix='']
+   * @param {boolean} [options.adaptive] — Activa o desactiva conmutación automática por RAM (default: true si L2 existe)
+   * @param {number} [options.pressureThresholdPercent=75] — Umbral de RAM para degradar a disco
+   * @param {number} [options.recoveryThresholdPercent=60] — Umbral de RAM para recuperar memoria
+   * @param {number} [options.maxRssMb] — Límite de RSS explícito en MB
+   * @param {number} [options.checkIntervalMs=10000] — Intervalo de chequeo periódico de RAM (0 para deshabilitar)
    */
   constructor(options = {}) {
     this.#l1 = options.l1 ?? new MemoryStore();
     this.#l2 = options.l2 ?? (options.file ? new FileStore(options.file) : null);
     this.#defaultTtlMs = options.defaultTtlMs ?? 60000;
     this.#prefix = options.prefix ?? '';
+
+    this.#adaptive = options.adaptive ?? Boolean(this.#l2);
+    this.#pressureThresholdPercent = options.pressureThresholdPercent ?? 75;
+    this.#recoveryThresholdPercent = options.recoveryThresholdPercent ?? 60;
+    this.#maxRssMb = options.maxRssMb ?? null;
+
+    const checkIntervalMs = options.checkIntervalMs ?? 10000;
+    if (this.#adaptive && checkIntervalMs > 0) {
+      this.#startMonitor(checkIntervalMs);
+    }
+
     this.#rebuildTagIndex();
   }
 
@@ -49,16 +81,27 @@ class TieredCache {
   get(key) {
     const fullKey = this.#key(key);
 
-    let record = this.#l1.getRecord(fullKey);
-    if (record) { this.#hits++; return record.value; }
+    if (this.#mode === CACHE_MODES.MEMORY) {
+      let record = this.#l1.getRecord(fullKey);
+      if (record) { this.#hits++; return record.value; }
 
-    // Miss en L1 → intentar L2 y repoblar L1 (read-through)
-    if (this.#l2) {
-      record = this.#l2.getRecord(fullKey);
-      if (record) {
-        this.#l1.setRecord(fullKey, record);
-        this.#hits++;
-        return record.value;
+      // Miss en L1 → intentar L2 y repoblar L1 (read-through)
+      if (this.#l2) {
+        record = this.#l2.getRecord(fullKey);
+        if (record) {
+          this.#l1.setRecord(fullKey, record);
+          this.#hits++;
+          return record.value;
+        }
+      }
+    } else {
+      // Modo DEGRADED_DISK: buscar directamente en L2 sin repoblar L1
+      if (this.#l2) {
+        const record = this.#l2.getRecord(fullKey);
+        if (record) {
+          this.#hits++;
+          return record.value;
+        }
       }
     }
 
@@ -67,6 +110,10 @@ class TieredCache {
   }
 
   set(key, value, options = {}) {
+    if (this.#adaptive) {
+      this.#evaluateMemoryPressure();
+    }
+
     const ttl = options.ttlMs ?? this.#defaultTtlMs;
     const tags = options.tags ?? [];
     const fullKey = this.#key(key);
@@ -76,7 +123,9 @@ class TieredCache {
       tags,
     };
 
-    this.#l1.setRecord(fullKey, record);
+    if (this.#mode === CACHE_MODES.MEMORY) {
+      this.#l1.setRecord(fullKey, record);
+    }
     if (this.#l2) this.#l2.setRecord(fullKey, record);
     this.#indexTags(fullKey, tags);
     return this;
@@ -84,13 +133,13 @@ class TieredCache {
 
   has(key) {
     const fullKey = this.#key(key);
-    if (this.#l1.has(fullKey)) return true;
+    if (this.#mode === CACHE_MODES.MEMORY && this.#l1.has(fullKey)) return true;
     return this.#l2 ? this.#l2.has(fullKey) : false;
   }
 
   del(key) {
     const fullKey = this.#key(key);
-    const a = this.#l1.del(fullKey);
+    const a = this.#mode === CACHE_MODES.MEMORY ? this.#l1.del(fullKey) : false;
     const b = this.#l2 ? this.#l2.del(fullKey) : false;
     this.#dropKeyFromAllTags(fullKey);
     return a || b;
@@ -122,7 +171,7 @@ class TieredCache {
     if (!keys) return 0;
     let count = 0;
     for (const fullKey of [...keys]) {
-      const a = this.#l1.del(fullKey);
+      const a = this.#mode === CACHE_MODES.MEMORY ? this.#l1.del(fullKey) : false;
       const b = this.#l2 ? this.#l2.del(fullKey) : false;
       if (a || b) count++;
       this.#dropKeyFromAllTags(fullKey);
@@ -144,11 +193,14 @@ class TieredCache {
    */
   invalidatePattern(pattern) {
     const regex = new RegExp('^' + this.#key(pattern).replace(/\*/g, '.*') + '$');
-    const seen = new Set([...this.#l1.keys(), ...(this.#l2 ? this.#l2.keys() : [])]);
+    const seen = new Set([
+      ...(this.#mode === CACHE_MODES.MEMORY ? this.#l1.keys() : []),
+      ...(this.#l2 ? this.#l2.keys() : []),
+    ]);
     let count = 0;
     for (const fullKey of seen) {
       if (regex.test(fullKey)) {
-        const a = this.#l1.del(fullKey);
+        const a = this.#mode === CACHE_MODES.MEMORY ? this.#l1.del(fullKey) : false;
         const b = this.#l2 ? this.#l2.del(fullKey) : false;
         if (a || b) count++;
         this.#dropKeyFromAllTags(fullKey);
@@ -165,6 +217,12 @@ class TieredCache {
       hits: this.#hits,
       misses: this.#misses,
       hitRate: total > 0 ? +(this.#hits / total).toFixed(4) : 0,
+      mode: this.#mode,
+      memoryPressure: this.#mode === CACHE_MODES.DEGRADED_DISK,
+      adaptiveEnabled: this.#adaptive,
+      pressureTransitions: this.#transitionsCount,
+      lastTransitionAt: this.#lastTransitionAt,
+      l1Evacuations: this.#l1Evacuations,
       l1Size: this.#l1.keys().length,
       l2Size: this.#l2 ? this.#l2.keys().length : 0,
       tiers: this.#l2 ? 2 : 1,
@@ -183,14 +241,14 @@ class TieredCache {
     const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
     const normalizedSearch = String(search).toLowerCase();
     const fullKeys = [...new Set([
-      ...this.#l1.keys(),
+      ...(this.#mode === CACHE_MODES.MEMORY ? this.#l1.keys() : []),
       ...(this.#l2 ? this.#l2.keys() : []),
     ])]
       .filter((key) => this.#stripPrefix(key).toLowerCase().includes(normalizedSearch))
       .sort();
     const start = (safePage - 1) * safeLimit;
     const entries = fullKeys.slice(start, start + safeLimit).map((fullKey) => {
-      const l1Record = this.#l1.getRecord(fullKey);
+      const l1Record = this.#mode === CACHE_MODES.MEMORY ? this.#l1.getRecord(fullKey) : null;
       const l2Record = this.#l2?.getRecord(fullKey);
       const record = l1Record ?? l2Record;
       return this.#entryMetadata(fullKey, record, Boolean(l1Record), Boolean(l2Record));
@@ -210,7 +268,7 @@ class TieredCache {
   /** Devuelve una entrada administrativa incluyendo su valor. */
   getEntry(key) {
     const fullKey = this.#key(key);
-    const l1Record = this.#l1.getRecord(fullKey);
+    const l1Record = this.#mode === CACHE_MODES.MEMORY ? this.#l1.getRecord(fullKey) : null;
     const l2Record = this.#l2?.getRecord(fullKey);
     const record = l1Record ?? l2Record;
     if (!record) return null;
@@ -222,18 +280,63 @@ class TieredCache {
 
   resetStats() { this.#hits = 0; this.#misses = 0; }
 
-  /** Vuelca el L2 a disco si aplica. */
+  /** Fuerza el volcado a disco si aplica. */
   flush() {
     if (this.#l2 && typeof this.#l2.flush === 'function') this.#l2.flush();
   }
 
   destroy() {
+    if (this.#monitorTimer) {
+      clearInterval(this.#monitorTimer);
+      this.#monitorTimer = null;
+    }
     this.#l1.destroy();
     if (this.#l2) this.#l2.destroy();
     this.#tagIndex.clear();
   }
 
-  // --- Private ---
+  // --- Adaptive State Management ---
+
+  #evaluateMemoryPressure() {
+    if (!this.#adaptive || !this.#l2) return;
+
+    if (this.#mode === CACHE_MODES.MEMORY) {
+      const underPressure = isMemoryUnderPressure({
+        thresholdPercent: this.#pressureThresholdPercent,
+        maxRssMb: this.#maxRssMb,
+      });
+
+      if (underPressure) {
+        this.#mode = CACHE_MODES.DEGRADED_DISK;
+        this.#l1.clear();
+        this.#l1Evacuations++;
+        this.#transitionsCount++;
+        this.#lastTransitionAt = new Date().toISOString();
+      }
+    } else if (this.#mode === CACHE_MODES.DEGRADED_DISK) {
+      const stillUnderPressure = isMemoryUnderPressure({
+        thresholdPercent: this.#recoveryThresholdPercent,
+        maxRssMb: this.#maxRssMb ? this.#maxRssMb * 0.8 : null,
+      });
+
+      if (!stillUnderPressure) {
+        this.#mode = CACHE_MODES.MEMORY;
+        this.#transitionsCount++;
+        this.#lastTransitionAt = new Date().toISOString();
+      }
+    }
+  }
+
+  #startMonitor(intervalMs) {
+    this.#monitorTimer = setInterval(() => {
+      this.#evaluateMemoryPressure();
+    }, intervalMs);
+    if (this.#monitorTimer.unref) {
+      this.#monitorTimer.unref();
+    }
+  }
+
+  // --- Private Helpers ---
 
   #key(key) {
     return this.#prefix ? `${this.#prefix}:${key}` : key;
@@ -280,4 +383,4 @@ class TieredCache {
   }
 }
 
-module.exports = { TieredCache };
+module.exports = { TieredCache, CACHE_MODES };

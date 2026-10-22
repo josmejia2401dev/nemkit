@@ -106,6 +106,7 @@ class MongoRepository extends BaseRepository {
     const {
       page = 1, limit = 20, sort = { createdAt: -1 },
       search = null, between = null, select, populate,
+      useEstimatedCount = false,
     } = options;
 
     const query = { ...this._baseFilter(options), ...filter };
@@ -127,9 +128,9 @@ class MongoRepository extends BaseRepository {
     if (select) docsQuery = docsQuery.select(select);
     if (populate) docsQuery = docsQuery.populate(populate);
 
-    const countPromise = (useEstimatedCount && Object.keys(query).length === 0)
-      ? this.model.estimatedDocumentCount()
-      : this.model.countDocuments(query).maxTimeMS(this.queryTimeoutMs);
+    const countPromise = useEstimatedCount && Object.keys(query).length === 0
+      ? this._applyTimeout(this.model.estimatedDocumentCount())
+      : this._applyTimeout(this.model.countDocuments(query));
 
     const [docs, total] = await Promise.all([
       this._prepareQuery(docsQuery, options),
@@ -148,6 +149,12 @@ class MongoRepository extends BaseRepository {
         hasPrev: page > 1,
       },
     };
+  }
+
+  /** @private — Applies lean mode by default and the configured query timeout. */
+  _prepareQuery(query, options = {}) {
+    const preparedQuery = options.lean === false ? query : query.lean();
+    return this._applyTimeout(preparedQuery);
   }
 
   // ═══════════════════════════════════════════════════════

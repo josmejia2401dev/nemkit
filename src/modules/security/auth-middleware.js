@@ -89,6 +89,8 @@ const createAuthMiddleware = ({ jwtManager, isBlacklisted, logger }) => {
         id: payload.id,
         email: payload.email,
         fullName: payload.fullName,
+        tenantId: payload.tenantId ?? null,
+        employeeId: payload.employeeId ?? null,
         roleIds: payload.roleIds ?? [],
         permissions: payload.permissions ?? [],
         roles: payload.roles ?? [],
@@ -98,6 +100,7 @@ const createAuthMiddleware = ({ jwtManager, isBlacklisted, logger }) => {
 
       // 6. Propagar a RequestContext
       RequestContext.setUserId(req.user.id);
+      if (req.user.tenantId != null) RequestContext.setTenantId(req.user.tenantId);
 
       return next();
     } catch (err) {

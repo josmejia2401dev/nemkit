@@ -91,6 +91,7 @@ const createAuthMiddleware = ({ jwtManager, isBlacklisted, logger }) => {
         fullName: payload.fullName,
         tenantId: payload.tenantId ?? null,
         employeeId: payload.employeeId ?? null,
+        businessType: payload.businessType ?? null,
         roleIds: payload.roleIds ?? [],
         permissions: payload.permissions ?? [],
         roles: payload.roles ?? [],

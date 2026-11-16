@@ -12,7 +12,23 @@
  * Uso como clase instanciable (con prefijos registrados) o como métodos estáticos.
  */
 
-const { randomUUID } = require('crypto');
+const { randomUUID, randomInt } = require('crypto');
+
+/**
+ * Contadores monotónicos por longitud de sufijo. Se siembran al azar en cada
+ * arranque para no repetir la secuencia tras un reinicio y se incrementan en
+ * cada llamada, de modo que dos IDs generados en el mismo milisegundo (por
+ * ejemplo dentro de un `createMany`) nunca colisionan.
+ */
+const sequences = new Map();
+
+function nextSequence(remaining) {
+  const modulo = 10 ** remaining;
+  const current = sequences.has(remaining) ? sequences.get(remaining) : randomInt(0, modulo);
+  const next = (current + 1) % modulo;
+  sequences.set(remaining, next);
+  return next;
+}
 
 class UniqueNumberUtil {
   #prefixes;
@@ -59,15 +75,19 @@ class UniqueNumberUtil {
 
   /**
    * Genera un ID numérico con prefijo de entidad.
-   * Estructura: [prefijo 3d][yyMMdd][timestamp+random]
+   * Estructura: [prefijo 3d][yyMMdd][contador monotónico]
    *
-   * @param {string} entity — Nombre de la entidad/modelo
+   * La capacidad diaria por prefijo depende de `digits`: con el valor por
+   * defecto (12) quedan 3 dígitos de contador (1000 IDs/día). Para volúmenes
+   * mayores, aumenta `digits` (máximo seguro: 15).
+   *
+   * @param {string} entity — Nombre del modelo o entidad
    * @param {number} [digits=12] — Total de dígitos del ID
    * @returns {number}
    *
    * @example
    * uid.generate('users');    // 101260819847291
-   * uid.generate('orders');   // 103260819293847
+   * uid.generate('orders', 15); // 103260819293847
    */
   generate(entity, digits = 12) {
     const prefix = this.#prefixes[entity];
@@ -88,7 +108,10 @@ class UniqueNumberUtil {
 
   /**
    * Genera un número único sin prefijo de entidad.
-   * Estructura: [yyMMdd 6d][timestamp tail + random]
+   * Estructura: [yyMMdd 6d][contador monotónico]
+   *
+   * El contador es único dentro del proceso y no depende del reloj, así que
+   * varias llamadas en el mismo milisegundo producen IDs distintos.
    *
    * @param {number} [digits=12] — Total de dígitos
    * @returns {number}
@@ -101,21 +124,8 @@ class UniqueNumberUtil {
 
     const dateStr = new Date().toISOString().slice(2, 10).replace(/-/g, ''); // yyMMdd
     const remaining = digits - 6;
-    const timeComponent = String(Date.now()).slice(-remaining);
-    const randomComponent = String(
-      Math.floor(Math.random() * Math.pow(10, remaining))
-    ).padStart(remaining, '0');
 
-    let numeric = dateStr + timeComponent;
-    if (numeric.length < digits) numeric += randomComponent.slice(0, digits - numeric.length);
-    if (numeric.length > digits) numeric = numeric.slice(0, digits);
-
-    // Asegurar que no comience con 0
-    if (numeric.charAt(0) === '0') {
-      numeric = String(Math.floor(Math.random() * 9) + 1) + numeric.slice(1);
-    }
-
-    return Number(numeric);
+    return Number(dateStr + String(nextSequence(remaining)).padStart(remaining, '0'));
   }
 
   /**

@@ -42,7 +42,7 @@ const createErrorMiddleware = (options = {}) => {
 
     const log = logger?.child?.({ requestId }) ?? console;
 
-    const { statusCode, errorType, message, errors } = classifyError(err, isDev);
+    const { statusCode, errorType, message, errors, code } = classifyError(err, isDev);
 
     // Logging — siempre incluir stack en logs internos
     const logMeta = {
@@ -66,6 +66,9 @@ const createErrorMiddleware = (options = {}) => {
     const body = {
       success: false,
       error: errorType,
+      // Código de negocio del AppError (p. ej. PLAN_LIMIT_REACHED) para que el
+      // cliente distinga causas sin depender del texto del mensaje.
+      ...(code ? { code } : {}),
       message,
       errors: errors ?? null,
       metadata: { requestId },
@@ -79,7 +82,7 @@ const createErrorMiddleware = (options = {}) => {
  * Clasifica un error y determina status code, tipo y mensaje.
  * @param {Error} err
  * @param {boolean} isDev
- * @returns {{ statusCode: number, errorType: string, message: string, errors: Array|null }}
+ * @returns {{ statusCode: number, errorType: string, message: string, errors: Array|null, code?: string }}
  */
 const classifyError = (err, isDev) => {
   // Errores de la app (isOperational = true)
@@ -89,6 +92,7 @@ const classifyError = (err, isDev) => {
       errorType: 'HTTP Error',
       message: err.message,
       errors: null,
+      code: err.code,
     };
   }
 
@@ -98,6 +102,7 @@ const classifyError = (err, isDev) => {
       errorType: 'Domain Error',
       message: err.message,
       errors: null,
+      code: err.code,
     };
   }
 
@@ -107,6 +112,7 @@ const classifyError = (err, isDev) => {
       errorType: 'Validation Error',
       message: err.message,
       errors: err.errors,
+      code: err.code,
     };
   }
 
